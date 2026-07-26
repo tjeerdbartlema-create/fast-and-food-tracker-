@@ -1,0 +1,1340 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Vasten" />
+<title>Vasten</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #0F1220; }
+  .vasten-btn { transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease; }
+  .vasten-btn:hover { transform: translateY(-1px); }
+  .vasten-btn:active { transform: translateY(0); }
+  .vasten-row:hover { background: rgba(255,255,255,0.03); }
+  .vasten-del:hover { opacity: 1 !important; }
+  .vasten-tab {
+    display: inline-flex !important;
+    align-items: center !important;
+    border-radius: 999px !important;
+    padding: 7px 18px !important;
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    cursor: pointer !important;
+    font-family: 'Inter', sans-serif !important;
+  }
+  .vasten-tab-active {
+    background: #1F2438 !important;
+    color: #EDE9DD !important;
+    border: 1px solid #4FA896 !important;
+  }
+  .vasten-tab-inactive {
+    background: transparent !important;
+    color: #8A8FA8 !important;
+    border: 1px solid #2A2F45 !important;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+<script>
+  // localStorage-backed replacement for window.storage, same call shape as the
+  // Claude-artifact version so the rest of the app code is unchanged.
+  window.storage = {
+    async get(key) {
+      try {
+        const v = localStorage.getItem(key);
+        return v !== null ? { key, value: v } : null;
+      } catch (e) {
+        throw e;
+      }
+    },
+    async set(key, value) {
+      try {
+        localStorage.setItem(key, value);
+        return { key, value };
+      } catch (e) {
+        throw e;
+      }
+    },
+  };
+</script>
+
+<script>
+const {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo
+} = React;
+const STAGES = [{
+  min: 0,
+  max: 4,
+  name: "Spijsvertering",
+  desc: "Het lichaam verwerkt nog de laatste maaltijd. Bloedsuiker en insuline zijn verhoogd."
+}, {
+  min: 4,
+  max: 12,
+  name: "Glycogeen afbouw",
+  desc: "De glycogeenvoorraad in de lever slinkt, insuline daalt geleidelijk."
+}, {
+  min: 12,
+  max: 18,
+  name: "Vetverbranding",
+  desc: "Het lichaam schakelt steeds meer over op vetzuren als brandstof."
+}, {
+  min: 18,
+  max: 24,
+  name: "Ketose",
+  desc: "Ketonlichamen stijgen; vet is nu de belangrijkste energiebron."
+}, {
+  min: 24,
+  max: 48,
+  name: "Autofagie",
+  desc: "Cellulaire opruiming neemt toe — het lichaam breekt beschadigde celonderdelen af."
+}, {
+  min: 48,
+  max: Infinity,
+  name: "Diepe autofagie",
+  desc: "Autofagie en groeihormoonspiegel bereiken hun piek."
+}];
+const MAX_SCALE_PRESETS = [16, 18, 20, 24, 36, 48, 72];
+const GOAL_PRESETS = [12, 13, 14, 15, 16, 17, 18, 20, 24, 36, 48, 72];
+const DEFAULT_MAX_SCALE_HOURS = 24;
+const DEFAULT_GOAL_HOURS = 16;
+const SEGMENTS = [{
+  hours: 4,
+  color: "#5B6382",
+  label: "4u"
+}, {
+  hours: 8,
+  color: "#7A7F9E",
+  label: "12u"
+}, {
+  hours: 6,
+  color: "#C98A4B",
+  label: "18u"
+}, {
+  hours: 6,
+  color: "#D9A65C",
+  label: "24u"
+}, {
+  hours: 24,
+  color: "#4FA896",
+  label: "48u"
+}, {
+  hours: 24,
+  color: "#2E7D6E",
+  label: "72u"
+}];
+function buildDisplaySegments(scaleHours) {
+  const result = [];
+  let cumulative = 0;
+  for (const seg of SEGMENTS) {
+    if (cumulative >= scaleHours) break;
+    const portion = Math.min(seg.hours, scaleHours - cumulative);
+    result.push({
+      ...seg,
+      hours: portion
+    });
+    cumulative += seg.hours;
+  }
+  if (cumulative < scaleHours && result.length) {
+    result[result.length - 1].hours += scaleHours - cumulative;
+  }
+  return result;
+}
+function buildTickMarks(scaleHours) {
+  let cumulative = 0;
+  const ticks = [];
+  for (const seg of SEGMENTS.slice(0, -1)) {
+    cumulative += seg.hours;
+    if (cumulative > scaleHours) break;
+    ticks.push({
+      hours: cumulative,
+      label: seg.label,
+      pct: cumulative / scaleHours * 100
+    });
+    if (cumulative >= scaleHours) break;
+  }
+  return ticks;
+}
+function getStage(hours) {
+  return STAGES.find(s => hours >= s.min && hours < s.max) || STAGES[STAGES.length - 1];
+}
+function formatDuration(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor(totalSeconds % 3600 / 60);
+  const s = totalSeconds % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+function formatDurationShort(ms) {
+  const totalMinutes = Math.round(ms / 60000);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${h}u ${m}m`;
+}
+function formatDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString("nl-NL", {
+    day: "numeric",
+    month: "short",
+    year: "numeric"
+  });
+}
+function formatTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString("nl-NL", {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+function WeightChart({
+  data
+}) {
+  if (data.length < 2) return null;
+  const width = 600;
+  const height = 180;
+  const padL = 40,
+    padR = 12,
+    padT = 10,
+    padB = 24;
+  const values = data.map(d => d.weight);
+  const min = Math.min(...values) - 1;
+  const max = Math.max(...values) + 1;
+  const xStep = (width - padL - padR) / (data.length - 1);
+  const yFor = v => padT + (1 - (v - min) / (max - min || 1)) * (height - padT - padB);
+  const points = data.map((d, i) => [padL + i * xStep, yFor(d.weight)]);
+  const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const yTicks = 4;
+  const tickVals = Array.from({
+    length: yTicks + 1
+  }, (_, i) => min + (max - min) * i / yTicks);
+  return /*#__PURE__*/React.createElement("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      width: "100%",
+      height: 180,
+      display: "block"
+    }
+  }, tickVals.map((v, i) => /*#__PURE__*/React.createElement("g", {
+    key: i
+  }, /*#__PURE__*/React.createElement("line", {
+    x1: padL,
+    x2: width - padR,
+    y1: yFor(v),
+    y2: yFor(v),
+    stroke: "#2A2F45",
+    strokeDasharray: "3 3"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: 4,
+    y: yFor(v) + 3,
+    fontSize: "10",
+    fill: "#8A8FA8",
+    fontFamily: "'IBM Plex Mono', monospace"
+  }, v.toFixed(1)))), /*#__PURE__*/React.createElement("path", {
+    d: path,
+    fill: "none",
+    stroke: "#D9A65C",
+    strokeWidth: "2"
+  }), points.map((p, i) => /*#__PURE__*/React.createElement("circle", {
+    key: i,
+    cx: p[0],
+    cy: p[1],
+    r: "3",
+    fill: "#D9A65C"
+  })), data.map((d, i) => i % Math.ceil(data.length / 6 || 1) === 0 ? /*#__PURE__*/React.createElement("text", {
+    key: i,
+    x: padL + i * xStep,
+    y: height - 6,
+    fontSize: "10",
+    fill: "#8A8FA8",
+    fontFamily: "'Inter', sans-serif",
+    textAnchor: "middle"
+  }, d.date) : null));
+}
+function VastenApp() {
+  const [loaded, setLoaded] = useState(false);
+  const [activeTab, setActiveTab] = useState("vandaag");
+  const [currentStart, setCurrentStart] = useState(null);
+  const [log, setLog] = useState([]);
+  const [weights, setWeights] = useState([]);
+  const [now, setNow] = useState(Date.now());
+  const [weightInput, setWeightInput] = useState("");
+  const [weightDate, setWeightDate] = useState(new Date().toISOString().slice(0, 10));
+  const [error, setError] = useState("");
+  const [goalHours, setGoalHours] = useState(DEFAULT_GOAL_HOURS);
+  const [maxScaleHours, setMaxScaleHours] = useState(DEFAULT_MAX_SCALE_HOURS);
+  const [meals, setMeals] = useState([]);
+  const [mealHistory, setMealHistory] = useState([]);
+  const [pendingSummary, setPendingSummary] = useState(null);
+  const [mealName, setMealName] = useState("");
+  const [mealQty, setMealQty] = useState("");
+  const [mealKcal, setMealKcal] = useState("");
+  const [mealProtein, setMealProtein] = useState("");
+  const nowLocal = new Date();
+  const [startDateInput, setStartDateInput] = useState(nowLocal.toISOString().slice(0, 10));
+  const [startTimeInput, setStartTimeInput] = useState(`${String(nowLocal.getHours()).padStart(2, "0")}:${String(nowLocal.getMinutes()).padStart(2, "0")}`);
+  const [stopDateTimeInput, setStopDateTimeInput] = useState(`${nowLocal.getFullYear()}-${String(nowLocal.getMonth() + 1).padStart(2, "0")}-${String(nowLocal.getDate()).padStart(2, "0")}T${String(nowLocal.getHours()).padStart(2, "0")}:${String(nowLocal.getMinutes()).padStart(2, "0")}`);
+  useEffect(() => {
+    (async () => {
+      try {
+        const fastingData = await window.storage.get("fasting-data");
+        if (fastingData && fastingData.value) {
+          const parsed = JSON.parse(fastingData.value);
+          setCurrentStart(parsed.currentStart || null);
+          setLog(Array.isArray(parsed.log) ? parsed.log : []);
+          if (parsed.goalHours) setGoalHours(parsed.goalHours);
+          if (parsed.maxScaleHours) setMaxScaleHours(parsed.maxScaleHours);
+          if (parsed.pendingSummary) setPendingSummary(parsed.pendingSummary);
+        }
+      } catch (e) {}
+      try {
+        const weightData = await window.storage.get("weight-log");
+        if (weightData && weightData.value) setWeights(JSON.parse(weightData.value));
+      } catch (e) {}
+      try {
+        const mealData = await window.storage.get("meal-data");
+        if (mealData && mealData.value) {
+          const parsedMeals = JSON.parse(mealData.value);
+          setMeals(Array.isArray(parsedMeals.meals) ? parsedMeals.meals : []);
+          setMealHistory(Array.isArray(parsedMeals.history) ? parsedMeals.history : []);
+        }
+      } catch (e) {}
+      setLoaded(true);
+    })();
+  }, []);
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const saveWithRetry = useCallback(async (key, payload, attempts = 3) => {
+    let lastError = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        if (!window.storage || typeof window.storage.set !== "function") {
+          throw new Error("opslag niet beschikbaar in deze omgeving");
+        }
+        const result = await window.storage.set(key, payload);
+        if (result) return {
+          ok: true
+        };
+        lastError = new Error("geen bevestiging terug");
+      } catch (e) {
+        lastError = e;
+      }
+      if (i < attempts - 1) await new Promise(r => setTimeout(r, 500 * (i + 1)));
+    }
+    return {
+      ok: false,
+      error: lastError
+    };
+  }, []);
+  const persistFasting = useCallback(async (nextStart, nextLog, nextGoalHours, nextMaxScaleHours, nextPendingSummary) => {
+    const payload = JSON.stringify({
+      currentStart: nextStart,
+      log: nextLog,
+      goalHours: nextGoalHours ?? goalHours,
+      maxScaleHours: nextMaxScaleHours ?? maxScaleHours,
+      pendingSummary: nextPendingSummary !== undefined ? nextPendingSummary : pendingSummary
+    });
+    const res = await saveWithRetry("fasting-data", payload);
+    if (res.ok) setError("");else setError(`Opslaan is niet gelukt (${res.error?.message || "onbekende fout"}).`);
+  }, [saveWithRetry, goalHours, maxScaleHours, pendingSummary]);
+  const persistMeals = useCallback(async (nextMeals, nextHistory) => {
+    const payload = JSON.stringify({
+      meals: nextMeals,
+      history: nextHistory
+    });
+    const res = await saveWithRetry("meal-data", payload);
+    if (res.ok) setError("");else setError(`Opslaan is niet gelukt (${res.error?.message || "onbekende fout"}).`);
+  }, [saveWithRetry]);
+  const persistWeights = useCallback(async nextWeights => {
+    const payload = JSON.stringify(nextWeights);
+    const res = await saveWithRetry("weight-log", payload);
+    if (res.ok) setError("");else setError(`Opslaan is niet gelukt (${res.error?.message || "onbekende fout"}).`);
+  }, [saveWithRetry]);
+  const retrySave = useCallback(() => {
+    persistFasting(currentStart, log, goalHours, maxScaleHours);
+    persistWeights(weights);
+    persistMeals(meals, mealHistory);
+  }, [currentStart, log, weights, goalHours, maxScaleHours, meals, mealHistory, persistFasting, persistWeights, persistMeals]);
+  const elapsedMs = currentStart ? now - new Date(currentStart).getTime() : 0;
+  const elapsedHours = elapsedMs / 3600000;
+  const stage = getStage(elapsedHours);
+  const handleStart = () => {
+    const combined = new Date(`${startDateInput}T${startTimeInput || "00:00"}:00`);
+    if (isNaN(combined.getTime())) {
+      setError("Vul een geldige startdatum en -tijd in.");
+      return;
+    }
+    if (combined.getTime() > Date.now()) {
+      setError("De starttijd kan niet in de toekomst liggen.");
+      return;
+    }
+    setError("");
+    const iso = combined.toISOString();
+    const totalKcal = meals.reduce((s, m) => s + m.kcal, 0);
+    const totalProtein = meals.reduce((s, m) => s + m.protein, 0);
+    const summary = meals.length ? {
+      totalKcal,
+      totalProtein,
+      count: meals.length
+    } : null;
+    setCurrentStart(iso);
+    setPendingSummary(summary);
+    setMeals([]);
+    resetStopInputs();
+    persistFasting(iso, log, goalHours, maxScaleHours, summary);
+    persistMeals([], mealHistory);
+  };
+  const resetStopInputs = () => {
+    const d = new Date();
+    setStopDateTimeInput(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`);
+  };
+  const handleStop = () => {
+    if (!currentStart) return;
+    const combinedEnd = new Date(stopDateTimeInput);
+    if (!stopDateTimeInput || isNaN(combinedEnd.getTime())) {
+      setError("Vul een geldige stopdatum en -tijd in.");
+      return;
+    }
+    if (combinedEnd.getTime() > Date.now()) {
+      setError("De stoptijd kan niet in de toekomst liggen.");
+      return;
+    }
+    if (combinedEnd.getTime() <= new Date(currentStart).getTime()) {
+      setError("De stoptijd moet na de starttijd liggen.");
+      return;
+    }
+    setError("");
+    const endIso = combinedEnd.toISOString();
+    const entry = {
+      id: `${Date.now()}`,
+      start: currentStart,
+      end: endIso,
+      durationMs: new Date(endIso).getTime() - new Date(currentStart).getTime(),
+      mealsSummary: pendingSummary || null
+    };
+    const nextLog = [entry, ...log];
+    setLog(nextLog);
+    setCurrentStart(null);
+    setPendingSummary(null);
+    persistFasting(null, nextLog, goalHours, maxScaleHours, null);
+  };
+  const handleGoalChange = hours => {
+    setGoalHours(hours);
+    persistFasting(currentStart, log, hours, maxScaleHours);
+  };
+  const handleMaxScaleChange = hours => {
+    setMaxScaleHours(hours);
+    persistFasting(currentStart, log, goalHours, hours);
+  };
+  const handleAddWeight = () => {
+    const val = parseFloat(weightInput.replace(",", "."));
+    if (isNaN(val) || val <= 0) {
+      setError("Vul een geldig gewicht in.");
+      return;
+    }
+    setError("");
+    const entry = {
+      id: `${Date.now()}`,
+      date: weightDate,
+      weight: val
+    };
+    const nextWeights = [...weights.filter(w => w.date !== weightDate), entry].sort((a, b) => new Date(a.date) - new Date(b.date));
+    setWeights(nextWeights);
+    setWeightInput("");
+    persistWeights(nextWeights);
+  };
+  const handleDeleteWeight = id => {
+    const nextWeights = weights.filter(w => w.id !== id);
+    setWeights(nextWeights);
+    persistWeights(nextWeights);
+  };
+  const handleAddMeal = () => {
+    const kcalVal = parseFloat(mealKcal.replace(",", "."));
+    const proteinVal = parseFloat((mealProtein || "0").replace(",", ".")) || 0;
+    if (!mealName.trim() || isNaN(kcalVal) || kcalVal < 0) {
+      setError("Vul een naam en een geldig aantal kcal in.");
+      return;
+    }
+    setError("");
+    const entry = {
+      id: `${Date.now()}`,
+      date: new Date().toISOString(),
+      name: mealName.trim(),
+      qty: mealQty.trim(),
+      kcal: kcalVal,
+      protein: proteinVal
+    };
+    const nextMeals = [...meals, entry];
+    const nextHistory = [entry, ...mealHistory];
+    setMeals(nextMeals);
+    setMealHistory(nextHistory);
+    setMealName("");
+    setMealQty("");
+    setMealKcal("");
+    setMealProtein("");
+    persistMeals(nextMeals, nextHistory);
+  };
+  const handleDeleteMeal = id => {
+    const nextMeals = meals.filter(m => m.id !== id);
+    const nextHistory = mealHistory.filter(m => m.id !== id);
+    setMeals(nextMeals);
+    setMealHistory(nextHistory);
+    persistMeals(nextMeals, nextHistory);
+  };
+  const handleDeleteLog = id => {
+    const nextLog = log.filter(l => l.id !== id);
+    setLog(nextLog);
+    persistFasting(currentStart, nextLog, goalHours, maxScaleHours);
+  };
+  const scaleHours = Math.max(maxScaleHours, goalHours);
+  const dynamicSegments = useMemo(() => buildDisplaySegments(scaleHours), [scaleHours]);
+  const tickMarks = useMemo(() => buildTickMarks(scaleHours), [scaleHours]);
+  const gaugeFillPct = Math.min(elapsedHours / scaleHours, 1) * 100;
+  const goalPct = Math.min(goalHours / scaleHours, 1) * 100;
+  const goalReached = currentStart && elapsedHours >= goalHours;
+  const goalProgressPct = currentStart ? Math.min(elapsedHours / goalHours * 100, 999) : 0;
+  const chartData = useMemo(() => weights.map(w => ({
+    date: formatDate(w.date),
+    weight: Number(w.weight.toFixed(2)),
+    raw: w.date
+  })), [weights]);
+  const stats = useMemo(() => {
+    const count = log.length;
+    if (count === 0) return {
+      count: 0,
+      avgMs: 0,
+      longestMs: 0,
+      avgKcal: null,
+      avgProtein: null
+    };
+    const totalMs = log.reduce((sum, e) => sum + e.durationMs, 0);
+    const longestMs = Math.max(...log.map(e => e.durationMs));
+    const withMeals = log.filter(e => e.mealsSummary);
+    const avgKcal = withMeals.length ? withMeals.reduce((s, e) => s + e.mealsSummary.totalKcal, 0) / withMeals.length : null;
+    const avgProtein = withMeals.length ? withMeals.reduce((s, e) => s + e.mealsSummary.totalProtein, 0) / withMeals.length : null;
+    return {
+      count,
+      avgMs: totalMs / count,
+      longestMs,
+      avgKcal,
+      avgProtein
+    };
+  }, [log]);
+  const stopPreview = useMemo(() => {
+    if (!currentStart || !stopDateTimeInput) return null;
+    const end = new Date(stopDateTimeInput);
+    if (isNaN(end.getTime())) return null;
+    const ms = end.getTime() - new Date(currentStart).getTime();
+    if (ms <= 0) return {
+      invalid: true
+    };
+    return {
+      invalid: false,
+      text: `${formatDurationShort(ms)} — eindigt ${formatDate(end.toISOString())} om ${formatTime(end.toISOString())}`
+    };
+  }, [currentStart, stopDateTimeInput]);
+  const mealTotals = useMemo(() => ({
+    kcal: meals.reduce((s, m) => s + m.kcal, 0),
+    protein: meals.reduce((s, m) => s + m.protein, 0)
+  }), [meals]);
+  return /*#__PURE__*/React.createElement("div", {
+    style: styles.page
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.container
+  }, /*#__PURE__*/React.createElement("header", {
+    style: styles.header
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: styles.eyebrow
+  }, "Vasten"), /*#__PURE__*/React.createElement("h1", {
+    style: styles.title
+  }, "Waar sta je vandaag")), /*#__PURE__*/React.createElement("div", {
+    style: styles.dateNow
+  }, new Date(now).toLocaleDateString("nl-NL", {
+    weekday: "long",
+    day: "numeric",
+    month: "long"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: styles.tabBar
+  }, /*#__PURE__*/React.createElement("button", {
+    className: `vasten-btn vasten-tab ${activeTab === "vandaag" ? "vasten-tab-active" : "vasten-tab-inactive"}`,
+    onClick: () => setActiveTab("vandaag")
+  }, "Vandaag"), /*#__PURE__*/React.createElement("button", {
+    className: `vasten-btn vasten-tab ${activeTab === "historie" ? "vasten-tab-active" : "vasten-tab-inactive"}`,
+    onClick: () => setActiveTab("historie")
+  }, "Historie"), /*#__PURE__*/React.createElement("button", {
+    className: `vasten-btn vasten-tab ${activeTab === "maaltijden" ? "vasten-tab-active" : "vasten-tab-inactive"}`,
+    onClick: () => setActiveTab("maaltijden")
+  }, "Maaltijden")), error && /*#__PURE__*/React.createElement("div", {
+    style: styles.errorBox
+  }, /*#__PURE__*/React.createElement("span", null, error), /*#__PURE__*/React.createElement("div", {
+    style: styles.errorActions
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "vasten-btn",
+    onClick: retrySave,
+    style: styles.errorRetryBtn
+  }, "Opnieuw proberen"), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-btn",
+    onClick: () => setError(""),
+    style: styles.errorDismissBtn,
+    "aria-label": "Sluiten"
+  }, "×"))), activeTab === "vandaag" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+    style: styles.hero
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.gaugeOuter
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.gaugeBarH
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.gaugeSegmentsClip
+  }, dynamicSegments.map((seg, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      flexGrow: seg.hours,
+      background: seg.color,
+      opacity: 1,
+      borderRight: i < dynamicSegments.length - 1 ? "1px solid rgba(15,18,32,0.4)" : "none"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...styles.goalMarker,
+      left: `${goalPct}%`
+    },
+    title: `Doel: ${goalHours} uur`
+  }), currentStart && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...styles.currentMarker,
+      left: `${gaugeFillPct}%`
+    },
+    title: "Nu"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: styles.tickRow
+  }, tickMarks.map(t => /*#__PURE__*/React.createElement("span", {
+    key: t.hours,
+    style: {
+      ...styles.tickLabel,
+      left: `${t.pct}%`
+    }
+  }, t.label)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...styles.tickLabel,
+      ...styles.goalTickLabel,
+      left: `${goalPct}%`
+    }
+  }, "doel ", goalHours, "u"))), /*#__PURE__*/React.createElement("div", {
+    style: styles.statusPanel
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.timerLabel
+  }, currentStart ? "Bezig sinds" : "Geen actieve vasten"), currentStart && /*#__PURE__*/React.createElement("div", {
+    style: styles.timerSub
+  }, "gestart ", formatTime(currentStart), " · ", formatDate(currentStart)), /*#__PURE__*/React.createElement("div", {
+    style: styles.timerDigits
+  }, currentStart ? formatDuration(elapsedMs) : "00:00:00"), currentStart ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: styles.stageName
+  }, stage.name), /*#__PURE__*/React.createElement("div", {
+    style: styles.stageDesc
+  }, stage.desc), /*#__PURE__*/React.createElement("div", {
+    style: styles.goalProgress
+  }, goalReached ? `Doel van ${goalHours}u bereikt.` : `${Math.round(goalProgressPct)}% van je doel van ${goalHours}u`), pendingSummary && /*#__PURE__*/React.createElement("div", {
+    style: styles.mealSummaryLine
+  }, "Voor deze vasten: ", Math.round(pendingSummary.totalKcal), " kcal · ", pendingSummary.totalProtein.toFixed(1), " g eiwit (", pendingSummary.count, " ", pendingSummary.count === 1 ? "maaltijd" : "maaltijden", ")")) : /*#__PURE__*/React.createElement("div", {
+    style: styles.stageDesc
+  }, "Start een vasten om de fase-indicatie te zien."), !currentStart && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: styles.startForm
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: startDateInput,
+    onChange: e => setStartDateInput(e.target.value),
+    style: styles.dateInput
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "time",
+    value: startTimeInput,
+    onChange: e => setStartTimeInput(e.target.value),
+    style: styles.dateInput
+  })), /*#__PURE__*/React.createElement("div", {
+    style: styles.goalForm
+  }, /*#__PURE__*/React.createElement("span", {
+    style: styles.goalFormLabel
+  }, "Doel"), /*#__PURE__*/React.createElement("select", {
+    value: goalHours,
+    onChange: e => handleGoalChange(Number(e.target.value)),
+    style: styles.goalSelect
+  }, GOAL_PRESETS.map(h => /*#__PURE__*/React.createElement("option", {
+    key: h,
+    value: h
+  }, h, " uur"))), /*#__PURE__*/React.createElement("span", {
+    style: styles.goalFormLabel
+  }, "Schaal max"), /*#__PURE__*/React.createElement("select", {
+    value: maxScaleHours,
+    onChange: e => handleMaxScaleChange(Number(e.target.value)),
+    style: styles.goalSelect
+  }, MAX_SCALE_PRESETS.map(h => /*#__PURE__*/React.createElement("option", {
+    key: h,
+    value: h
+  }, h, " uur"))))), currentStart && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: styles.startForm
+  }, /*#__PURE__*/React.createElement("span", {
+    style: styles.goalFormLabel
+  }, "Stop op"), /*#__PURE__*/React.createElement("input", {
+    type: "datetime-local",
+    value: stopDateTimeInput,
+    onChange: e => setStopDateTimeInput(e.target.value),
+    style: styles.dateInput
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-btn",
+    onClick: resetStopInputs,
+    style: styles.btnNow
+  }, "Nu")), stopPreview && /*#__PURE__*/React.createElement("div", {
+    style: styles.mealSummaryLine
+  }, stopPreview.invalid ? "De stoptijd ligt vóór de starttijd." : `Wordt vastgelegd als: ${stopPreview.text}`)), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-btn",
+    onClick: currentStart ? handleStop : handleStart,
+    style: currentStart ? styles.btnStop : styles.btnStart
+  }, currentStart ? "Stop vasten" : "Start vasten"), /*#__PURE__*/React.createElement("div", {
+    style: styles.caveat
+  }, "Deze tijden zijn indicatief en verschillen per persoon."))), /*#__PURE__*/React.createElement("section", {
+    style: styles.section
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: styles.sectionTitle
+  }, "Gewicht vandaag"), /*#__PURE__*/React.createElement("div", {
+    style: styles.weightForm
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: weightDate,
+    onChange: e => setWeightDate(e.target.value),
+    style: styles.dateInput
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    inputMode: "decimal",
+    placeholder: "kg",
+    value: weightInput,
+    onChange: e => setWeightInput(e.target.value),
+    style: styles.weightInput
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-btn",
+    onClick: handleAddWeight,
+    style: styles.btnAdd
+  }, "Toevoegen"))), !currentStart && /*#__PURE__*/React.createElement("section", {
+    style: styles.section
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: styles.sectionTitle
+  }, "Maaltijden vandaag"), /*#__PURE__*/React.createElement("div", {
+    style: styles.mealForm
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    placeholder: "Wat",
+    value: mealName,
+    onChange: e => setMealName(e.target.value),
+    style: styles.mealNameInput
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    placeholder: "Hoeveelheid",
+    value: mealQty,
+    onChange: e => setMealQty(e.target.value),
+    style: styles.mealQtyInput
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    inputMode: "decimal",
+    placeholder: "kcal",
+    value: mealKcal,
+    onChange: e => setMealKcal(e.target.value),
+    style: styles.weightInput
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    inputMode: "decimal",
+    placeholder: "eiwit g",
+    value: mealProtein,
+    onChange: e => setMealProtein(e.target.value),
+    style: styles.weightInput
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-btn",
+    onClick: handleAddMeal,
+    style: styles.btnAdd
+  }, "Toevoegen")), meals.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: styles.emptyState
+  }, "Nog geen maaltijden in dit eetvenster.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: styles.logList
+  }, meals.map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.id,
+    className: "vasten-row",
+    style: styles.logRow
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: styles.logDate
+  }, m.name, m.qty ? ` · ${m.qty}` : ""), /*#__PURE__*/React.createElement("div", {
+    style: styles.logTimes
+  }, formatTime(m.date))), /*#__PURE__*/React.createElement("div", {
+    style: styles.logDurationWrap
+  }, /*#__PURE__*/React.createElement("span", {
+    style: styles.logDuration
+  }, Math.round(m.kcal), " kcal · ", m.protein.toFixed(1), " g"), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-del",
+    onClick: () => handleDeleteMeal(m.id),
+    style: styles.delBtn,
+    "aria-label": "Verwijder"
+  }, "×"))))), /*#__PURE__*/React.createElement("div", {
+    style: styles.mealTotalsLine
+  }, "Totaal: ", Math.round(mealTotals.kcal), " kcal · ", mealTotals.protein.toFixed(1), " g eiwit"))), /*#__PURE__*/React.createElement("section", {
+    style: styles.section
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: styles.sectionTitle
+  }, "Geschiedenis"), log.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: styles.emptyState
+  }, "Nog geen afgeronde vasten. Je eerste sessie verschijnt hier zodra je stopt.") : /*#__PURE__*/React.createElement("div", {
+    style: styles.logList
+  }, log.map(entry => /*#__PURE__*/React.createElement("div", {
+    key: entry.id,
+    className: "vasten-row",
+    style: styles.logRow
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: styles.logDate
+  }, formatDate(entry.start)), /*#__PURE__*/React.createElement("div", {
+    style: styles.logTimes
+  }, formatTime(entry.start), " — ", formatTime(entry.end))), /*#__PURE__*/React.createElement("div", {
+    style: styles.logDurationWrap
+  }, /*#__PURE__*/React.createElement("span", {
+    style: styles.logDuration
+  }, formatDuration(entry.durationMs)), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-del",
+    onClick: () => handleDeleteLog(entry.id),
+    style: styles.delBtn,
+    "aria-label": "Verwijder"
+  }, "×"))))))), activeTab === "historie" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+    style: styles.section
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: styles.sectionTitle
+  }, "Statistieken"), /*#__PURE__*/React.createElement("div", {
+    style: styles.statsRow
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.statCard
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.statValue
+  }, stats.count), /*#__PURE__*/React.createElement("div", {
+    style: styles.statLabel
+  }, "keer gevast")), /*#__PURE__*/React.createElement("div", {
+    style: styles.statCard
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.statValue
+  }, stats.count ? formatDurationShort(stats.avgMs) : "—"), /*#__PURE__*/React.createElement("div", {
+    style: styles.statLabel
+  }, "gemiddelde duur")), /*#__PURE__*/React.createElement("div", {
+    style: styles.statCard
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.statValue
+  }, stats.count ? formatDurationShort(stats.longestMs) : "—"), /*#__PURE__*/React.createElement("div", {
+    style: styles.statLabel
+  }, "langste cyclus")), /*#__PURE__*/React.createElement("div", {
+    style: styles.statCard
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.statValue
+  }, stats.avgKcal != null ? Math.round(stats.avgKcal) : "—"), /*#__PURE__*/React.createElement("div", {
+    style: styles.statLabel
+  }, "gemiddelde kcal per venster")), /*#__PURE__*/React.createElement("div", {
+    style: styles.statCard
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.statValue
+  }, stats.avgProtein != null ? stats.avgProtein.toFixed(1) : "—"), /*#__PURE__*/React.createElement("div", {
+    style: styles.statLabel
+  }, "gemiddeld eiwit (g)")))), /*#__PURE__*/React.createElement("section", {
+    style: styles.section
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: styles.sectionTitle
+  }, "Gewicht"), /*#__PURE__*/React.createElement("div", {
+    style: styles.weightForm
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: weightDate,
+    onChange: e => setWeightDate(e.target.value),
+    style: styles.dateInput
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    inputMode: "decimal",
+    placeholder: "kg",
+    value: weightInput,
+    onChange: e => setWeightInput(e.target.value),
+    style: styles.weightInput
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-btn",
+    onClick: handleAddWeight,
+    style: styles.btnAdd
+  }, "Toevoegen")), chartData.length > 1 && /*#__PURE__*/React.createElement("div", {
+    style: styles.chartWrap
+  }, /*#__PURE__*/React.createElement(WeightChart, {
+    data: chartData
+  })), weights.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: styles.emptyState
+  }, "Nog geen gewicht bijgehouden.") : /*#__PURE__*/React.createElement("div", {
+    style: styles.logList
+  }, [...weights].reverse().map(w => /*#__PURE__*/React.createElement("div", {
+    key: w.id,
+    className: "vasten-row",
+    style: styles.logRow
+  }, /*#__PURE__*/React.createElement("div", {
+    style: styles.logDate
+  }, formatDate(w.date)), /*#__PURE__*/React.createElement("div", {
+    style: styles.logDurationWrap
+  }, /*#__PURE__*/React.createElement("span", {
+    style: styles.logDuration
+  }, w.weight.toFixed(2), " kg"), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-del",
+    onClick: () => handleDeleteWeight(w.id),
+    style: styles.delBtn,
+    "aria-label": "Verwijder"
+  }, "×"))))))), activeTab === "maaltijden" && /*#__PURE__*/React.createElement("section", {
+    style: styles.section
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: styles.sectionTitle
+  }, "Alle maaltijden"), mealHistory.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: styles.emptyState
+  }, "Nog geen maaltijden geregistreerd.") : /*#__PURE__*/React.createElement("div", {
+    style: styles.logList
+  }, mealHistory.map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.id,
+    className: "vasten-row",
+    style: styles.logRow
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: styles.logDate
+  }, m.name, m.qty ? ` · ${m.qty}` : ""), /*#__PURE__*/React.createElement("div", {
+    style: styles.logTimes
+  }, formatDate(m.date), " · ", formatTime(m.date))), /*#__PURE__*/React.createElement("div", {
+    style: styles.logDurationWrap
+  }, /*#__PURE__*/React.createElement("span", {
+    style: styles.logDuration
+  }, Math.round(m.kcal), " kcal · ", m.protein.toFixed(1), " g"), /*#__PURE__*/React.createElement("button", {
+    className: "vasten-del",
+    onClick: () => handleDeleteMeal(m.id),
+    style: styles.delBtn,
+    "aria-label": "Verwijder"
+  }, "×"))))))));
+}
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "#0F1220",
+    fontFamily: "'Inter', sans-serif",
+    color: "#EDE9DD",
+    padding: "32px 16px 64px"
+  },
+  container: {
+    maxWidth: 640,
+    margin: "0 auto"
+  },
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-end",
+    marginBottom: 28,
+    flexWrap: "wrap",
+    gap: 8
+  },
+  eyebrow: {
+    fontSize: 12,
+    letterSpacing: "0.14em",
+    textTransform: "uppercase",
+    color: "#8A8FA8",
+    marginBottom: 4
+  },
+  title: {
+    fontFamily: "'Fraunces', serif",
+    fontWeight: 500,
+    fontSize: 28,
+    margin: 0,
+    color: "#EDE9DD"
+  },
+  dateNow: {
+    fontSize: 13,
+    color: "#8A8FA8",
+    textTransform: "capitalize"
+  },
+  tabBar: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 20
+  },
+  statsRow: {
+    display: "flex",
+    gap: 12,
+    flexWrap: "wrap"
+  },
+  statCard: {
+    flex: "1 1 140px",
+    background: "#171B2C",
+    border: "1px solid #2A2F45",
+    borderRadius: 12,
+    padding: "16px 18px"
+  },
+  statValue: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 24,
+    color: "#D9A65C"
+  },
+  statLabel: {
+    fontSize: 12,
+    color: "#8A8FA8",
+    marginTop: 4
+  },
+  hero: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 20,
+    background: "#171B2C",
+    border: "1px solid #2A2F45",
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 28
+  },
+  gaugeOuter: {
+    width: "100%"
+  },
+  gaugeBarH: {
+    position: "relative",
+    width: "100%",
+    height: 28,
+    borderRadius: 8,
+    overflow: "visible",
+    display: "flex",
+    background: "#0F1220"
+  },
+  gaugeSegmentsClip: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    borderRadius: 8,
+    overflow: "hidden"
+  },
+  tickRow: {
+    position: "relative",
+    width: "100%",
+    height: 30,
+    marginTop: 6
+  },
+  tickLabel: {
+    position: "absolute",
+    top: 0,
+    fontSize: 9,
+    color: "#5B6382",
+    fontFamily: "'IBM Plex Mono', monospace",
+    transform: "translateX(-50%)",
+    whiteSpace: "nowrap"
+  },
+  goalTickLabel: {
+    top: 14,
+    color: "#D9A65C",
+    fontWeight: 600
+  },
+  currentMarker: {
+    position: "absolute",
+    top: -5,
+    bottom: -5,
+    width: 2,
+    background: "#EDE9DD",
+    boxShadow: "0 0 8px 1px rgba(237,233,221,0.7)",
+    transform: "translateX(-1px)",
+    zIndex: 2
+  },
+  goalMarker: {
+    position: "absolute",
+    top: -5,
+    bottom: -5,
+    borderLeft: "2px dashed #D9A65C",
+    transform: "translateX(-1px)",
+    zIndex: 1
+  },
+  goalProgress: {
+    fontSize: 12,
+    color: "#4FA896",
+    marginTop: 6,
+    fontFamily: "'IBM Plex Mono', monospace"
+  },
+  goalForm: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 10,
+    flexWrap: "wrap"
+  },
+  goalFormLabel: {
+    fontSize: 13,
+    color: "#8A8FA8"
+  },
+  goalSelect: {
+    background: "#171B2C",
+    border: "1px solid #2A2F45",
+    borderRadius: 8,
+    color: "#EDE9DD",
+    padding: "8px 10px",
+    fontSize: 13,
+    fontFamily: "'Inter', sans-serif"
+  },
+  statusPanel: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column"
+  },
+  timerLabel: {
+    fontSize: 13,
+    color: "#8A8FA8"
+  },
+  timerSub: {
+    fontSize: 12,
+    color: "#5B6382",
+    marginTop: 2
+  },
+  timerDigits: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 40,
+    fontWeight: 500,
+    margin: "8px 0 4px",
+    letterSpacing: "0.02em"
+  },
+  stageName: {
+    fontFamily: "'Fraunces', serif",
+    fontSize: 20,
+    color: "#D9A65C",
+    marginTop: 8
+  },
+  stageDesc: {
+    fontSize: 13,
+    color: "#8A8FA8",
+    marginTop: 4,
+    lineHeight: 1.5,
+    maxWidth: 380
+  },
+  startForm: {
+    display: "flex",
+    gap: 8,
+    marginTop: 14,
+    flexWrap: "wrap",
+    alignItems: "center"
+  },
+  btnNow: {
+    background: "transparent",
+    color: "#8A8FA8",
+    border: "1px solid #2A2F45",
+    borderRadius: 8,
+    padding: "8px 14px",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer"
+  },
+  btnStart: {
+    marginTop: 16,
+    alignSelf: "flex-start",
+    background: "#D9A65C",
+    color: "#0F1220",
+    border: "none",
+    borderRadius: 10,
+    padding: "10px 20px",
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: "pointer"
+  },
+  btnStop: {
+    marginTop: 16,
+    alignSelf: "flex-start",
+    background: "transparent",
+    color: "#EDE9DD",
+    border: "1px solid #4FA896",
+    borderRadius: 10,
+    padding: "10px 20px",
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: "pointer"
+  },
+  caveat: {
+    fontSize: 11,
+    color: "#5B6382",
+    marginTop: "auto",
+    paddingTop: 16
+  },
+  errorBox: {
+    background: "rgba(201,138,75,0.12)",
+    border: "1px solid #C98A4B",
+    color: "#EDE9DD",
+    borderRadius: 8,
+    padding: "10px 12px 10px 14px",
+    fontSize: 13,
+    marginBottom: 20,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap"
+  },
+  errorActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: 4
+  },
+  errorRetryBtn: {
+    background: "transparent",
+    color: "#EDE9DD",
+    border: "1px solid #C98A4B",
+    borderRadius: 6,
+    padding: "5px 10px",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+    whiteSpace: "nowrap"
+  },
+  errorDismissBtn: {
+    background: "none",
+    border: "none",
+    color: "#8A8FA8",
+    fontSize: 18,
+    lineHeight: 1,
+    cursor: "pointer",
+    padding: "0 4px"
+  },
+  section: {
+    marginBottom: 32
+  },
+  sectionTitle: {
+    fontFamily: "'Fraunces', serif",
+    fontSize: 17,
+    fontWeight: 500,
+    marginBottom: 10,
+    color: "#EDE9DD"
+  },
+  emptyState: {
+    fontSize: 13,
+    color: "#5B6382",
+    padding: "16px 0",
+    borderTop: "1px solid #2A2F45"
+  },
+  logList: {
+    borderTop: "1px solid #2A2F45"
+  },
+  logRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "10px 4px",
+    borderBottom: "1px solid #2A2F45"
+  },
+  logDate: {
+    fontSize: 14,
+    color: "#EDE9DD"
+  },
+  logTimes: {
+    fontSize: 12,
+    color: "#8A8FA8",
+    marginTop: 2
+  },
+  logDurationWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10
+  },
+  logDuration: {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 14,
+    color: "#4FA896"
+  },
+  delBtn: {
+    background: "none",
+    border: "none",
+    color: "#8A8FA8",
+    fontSize: 18,
+    lineHeight: 1,
+    cursor: "pointer",
+    opacity: 0.5,
+    padding: "0 4px"
+  },
+  weightForm: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 12,
+    flexWrap: "wrap"
+  },
+  mealForm: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 12,
+    flexWrap: "wrap"
+  },
+  mealNameInput: {
+    background: "#171B2C",
+    border: "1px solid #2A2F45",
+    borderRadius: 8,
+    color: "#EDE9DD",
+    padding: "8px 10px",
+    fontSize: 13,
+    width: 140,
+    fontFamily: "'Inter', sans-serif"
+  },
+  mealQtyInput: {
+    background: "#171B2C",
+    border: "1px solid #2A2F45",
+    borderRadius: 8,
+    color: "#EDE9DD",
+    padding: "8px 10px",
+    fontSize: 13,
+    width: 110,
+    fontFamily: "'Inter', sans-serif"
+  },
+  mealTotalsLine: {
+    fontSize: 13,
+    color: "#D9A65C",
+    fontFamily: "'IBM Plex Mono', monospace",
+    padding: "10px 4px 0"
+  },
+  mealSummaryLine: {
+    fontSize: 12,
+    color: "#8A8FA8",
+    marginTop: 6,
+    fontFamily: "'IBM Plex Mono', monospace"
+  },
+  dateInput: {
+    background: "#171B2C",
+    border: "1px solid #2A2F45",
+    borderRadius: 8,
+    color: "#EDE9DD",
+    padding: "8px 10px",
+    fontSize: 13,
+    fontFamily: "'Inter', sans-serif"
+  },
+  weightInput: {
+    background: "#171B2C",
+    border: "1px solid #2A2F45",
+    borderRadius: 8,
+    color: "#EDE9DD",
+    padding: "8px 10px",
+    fontSize: 13,
+    width: 90,
+    fontFamily: "'IBM Plex Mono', monospace"
+  },
+  btnAdd: {
+    background: "#4FA896",
+    color: "#0F1220",
+    border: "none",
+    borderRadius: 8,
+    padding: "8px 16px",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer"
+  },
+  chartWrap: {
+    background: "#171B2C",
+    border: "1px solid #2A2F45",
+    borderRadius: 12,
+    padding: "12px 4px 4px",
+    marginBottom: 12
+  }
+};
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(/*#__PURE__*/React.createElement(VastenApp, null));
+</script>
+</body>
+</html>
